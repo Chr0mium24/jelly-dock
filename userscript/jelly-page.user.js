@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jelly Page
 // @namespace    https://github.com/Chr0mium24/jelly-dock
-// @version      0.1.0
+// @version      0.2.0
 // @description  让网页里的字和图标像果冻一样同步上下弹（和 Jelly Dock 同一个节拍）
 // @match        *://*/*
 // @run-at       document-idle
@@ -19,6 +19,7 @@
   const STEPS = 24;            // 正弦曲线采样点
   const MAX_WORDS = 30000;     // 逐字模式最多拆多少个 span
   const MAX_ICON = 320;        // 超过这个尺寸的图片不弹（横幅、视频封面）
+  const START_DELAY = 1500;    // load 之后再等一会儿，避开 SSR 页面的 hydration
 
   const cfg = Object.assign({ mode: 'char', off: {} }, GM_getValue('cfg', {}));
   const host = location.hostname;
@@ -46,13 +47,10 @@
     return { transform: `scale(${(1 / (1 + q)).toFixed(4)}, ${(1 + q).toFixed(4)})` };
   });
   const timing = { duration: 1000 / HZ, iterations: Infinity, composite: 'add' };
-
-  const style = document.createElement('style');
-  style.textContent = `
+  const CSS = `
     .jl-w { display: inline-block; white-space: pre; }
     .jl-t { transform-origin: 50% 100% !important; }
   `;
-  document.documentElement.appendChild(style);
 
   // ---- 只给视口附近的元素挂动画；startTime=0 让所有元素踩同一个相位 ----
   const anims = new Map();
@@ -94,8 +92,21 @@
 
   // ---- 文字 ----
   const SKIP = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEXTAREA', 'INPUT', 'SELECT', 'OPTION', 'TITLE', 'svg']);
-  // CJK 一个字一个块；拉丁文按单词；空白保留为文本以便正常换行
-  const TOKEN = /[⺀-鿿가-힯豈-﫿＀-￯]|[^\s⺀-鿿가-힯豈-﫿＀-￯]+|\s+/g;
+  // 按字形簇（grapheme）切：中日韩字、emoji、全角标点一个一块；拉丁文连成单词；空白保留为文本以便正常换行
+  const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+  const SOLO = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Extended_Pictographic}\u3000-\u303f\uff00-\uffef]/u;
+  function tokens(text) {
+    const out = [];
+    let word = '';
+    const flush = () => { if (word) { out.push(word); word = ''; } };
+    for (const { segment: g } of seg.segment(text)) {
+      if (/^\s+$/.test(g)) { flush(); out.push(g); }
+      else if (SOLO.test(g)) { flush(); out.push(g); }
+      else word += g;
+    }
+    flush();
+    return out;
+  }
   let words = 0;
 
   function textNodes(root) {
@@ -112,20 +123,36 @@
     return out;
   }
 
+  // 原文本节点不删，只清空：Vue/React/Lit 仍持有这个节点做锚点、改 data、removeChild 都不会出错。
+  // 框架之后改了它的内容（characterData）或把它删掉，就同步重拆/清理对应的 span。
+  const owned = new WeakMap(); // 原文本节点 -> 拆出来的 span[]
+
   function splitText(node) {
     if (words >= MAX_WORDS || node.parentElement.closest('.jl-t')) return;
     const frag = document.createDocumentFragment();
-    for (const tok of node.nodeValue.match(TOKEN) || []) {
+    const spans = [];
+    for (const tok of tokens(node.data)) {
       if (/^\s+$/.test(tok)) { frag.appendChild(document.createTextNode(tok)); continue; }
       const s = document.createElement('span');
       s.className = 'jl-w';
       s.textContent = tok;
       frag.appendChild(s);
-      words++;
+      spans.push(s);
     }
-    const spans = [...frag.querySelectorAll('.jl-w')];
-    node.replaceWith(frag);
+    words += spans.length;
+    const ws = [...frag.childNodes];
+    node.parentNode.insertBefore(frag, node);
+    node.data = '';
+    owned.set(node, ws);
     spans.forEach(mark);
+  }
+
+  function unsplit(node) {
+    for (const n of owned.get(node) || []) {
+      if (n.nodeType === 1) { io.unobserve(n); anims.get(n)?.cancel(); anims.delete(n); words--; }
+      n.remove();
+    }
+    owned.delete(node);
   }
 
   const blockOf = el => {
@@ -143,6 +170,39 @@
     }
   }
 
+  // ---- Shadow DOM（比如 B 站评论区）：每个 open shadow root 单独注入样式、单独监听 ----
+  const roots = new WeakSet();
+  function watchRoot(root) {
+    if (roots.has(root)) return;
+    roots.add(root);
+    const style = document.createElement('style');
+    style.textContent = CSS;
+    (root === document ? document.documentElement : root).appendChild(style);
+    new MutationObserver(muts => {
+      for (const m of muts) {
+        if (m.type === 'characterData') {
+          const t = m.target;
+          if (owned.has(t) && t.data !== '') { unsplit(t); if (t.parentElement) enqueue(t.parentElement); }
+          continue;
+        }
+        for (const n of m.removedNodes) if (owned.has(n)) unsplit(n);
+        for (const n of m.addedNodes) {
+          if (n.nodeType === 1 && !n.classList.contains('jl-w')) enqueue(n);
+          else if (n.nodeType === 3 && n.parentElement && n.data.trim()) enqueue(n.parentElement);
+        }
+      }
+    }).observe(root === document ? document.body : root, { childList: true, subtree: true, characterData: true });
+  }
+  function scanShadows(root, deep = false) {
+    const els = root.querySelectorAll ? root.querySelectorAll('*') : [];
+    for (const el of [root, ...els]) {
+      const sr = el.shadowRoot;
+      if (!sr) continue;
+      if (!roots.has(sr)) { watchRoot(sr); enqueue(sr); }
+      if (deep) scanShadows(sr, true);
+    }
+  }
+
   // ---- 扫描：首屏 + 之后动态插入的内容（空闲时分批处理）----
   const queue = [];
   let scheduled = false;
@@ -156,18 +216,19 @@
     while (queue.length && deadline.timeRemaining() > 2) {
       const n = queue.shift();
       if (!n.isConnected) continue;
+      scanShadows(n);
       scanIcons(n);
       scanText(n);
     }
     if (queue.length) idle(drain); else scheduled = false;
   }
 
-  new MutationObserver(muts => {
-    for (const m of muts) for (const n of m.addedNodes) {
-      if (n.nodeType === 1 && !n.classList.contains('jl-w')) enqueue(n);
-      else if (n.nodeType === 3 && n.parentElement) enqueue(n.parentElement);
-    }
-  }).observe(document.body, { childList: true, subtree: true });
-
-  enqueue(document.body);
+  function start() {
+    watchRoot(document);
+    enqueue(document.body);
+    // shadow root 有时在宿主插入之后才挂上，隔一阵补扫一次
+    setInterval(() => scanShadows(document.body, true), 2000);
+  }
+  const later = () => setTimeout(start, START_DELAY);
+  if (document.readyState === 'complete') later(); else addEventListener('load', later, { once: true });
 })();

@@ -47,7 +47,7 @@ defaults delete com.apple.finder CreateDesktop && killall Finder
 
 [`userscript/jelly-page.user.js`](userscript/jelly-page.user.js) 让网页里的文字和图标用同一个节拍一起弹。装好 Tampermonkey / Violentmonkey 后打开 [raw 链接](https://raw.githubusercontent.com/Chr0mium24/jelly-dock/main/userscript/jelly-page.user.js) 即可安装。
 
-- 逐字模式（默认）：中日韩一个字一块、英文一个单词一块；会改写页面文本节点，个别 React/Vue 单页应用可能因此报错，遇到就切「整块」模式或在该站关闭
+- 逐字模式（默认）：中日韩字 / emoji 一个一块、英文一个单词一块。原文本节点保留在原位只清空内容，Vue/React/Lit 更新时会自动重拆，不会把组件弄丢；支持 open Shadow DOM（如 B 站评论区）和动态内容（弹幕）
 - 整块模式：整段文字一起弹，不改 DOM
 - `Alt+J` 或脚本菜单：在当前站点开/关；只对视口附近的元素挂动画，所有元素同一相位
 

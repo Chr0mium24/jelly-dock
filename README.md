@@ -43,6 +43,14 @@ defaults delete com.apple.finder CreateDesktop && killall Finder
 
 暂不支持：拖动、文件夹/下载栈/废纸篓、桌面图标位置记忆、多显示器。
 
+## 浏览器：油猴脚本
+
+[`userscript/jelly-page.user.js`](userscript/jelly-page.user.js) 让网页里的文字和图标用同一个节拍一起弹。装好 Tampermonkey / Violentmonkey 后打开 [raw 链接](https://raw.githubusercontent.com/Chr0mium24/jelly-dock/main/userscript/jelly-page.user.js) 即可安装。
+
+- 逐字模式（默认）：中日韩一个字一块、英文一个单词一块；会改写页面文本节点，个别 React/Vue 单页应用可能因此报错，遇到就切「整块」模式或在该站关闭
+- 整块模式：整段文字一起弹，不改 DOM
+- `Alt+J` 或脚本菜单：在当前站点开/关；只对视口附近的元素挂动画，所有元素同一相位
+
 ## 调参
 
 `main.swift` 顶部：
